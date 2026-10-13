@@ -1,8 +1,15 @@
 from raiden.control.base import TeleopInterface
+from raiden.control.handguide import HandGuideInterface
 from raiden.control.spacemouse import SpaceMouseInterface
 from raiden.control.yam import YAMInterface
 
-__all__ = ["TeleopInterface", "YAMInterface", "SpaceMouseInterface", "build_interface"]
+__all__ = [
+    "TeleopInterface",
+    "YAMInterface",
+    "SpaceMouseInterface",
+    "HandGuideInterface",
+    "build_interface",
+]
 
 
 def build_interface(
@@ -12,6 +19,7 @@ def build_interface(
     vel_scale: float = 0.07,
     rot_scale: float = 0.8,
     invert_rotation: bool = False,
+    handguide_damping: float = 0.2,
 ) -> TeleopInterface:
     """Construct the right TeleopInterface from CLI-style arguments."""
     if control == "spacemouse":
@@ -22,4 +30,6 @@ def build_interface(
             rot_scale=rot_scale,
             invert_rotation=invert_rotation,
         )
+    if control == "handguide":
+        return HandGuideInterface(damping_scale=handguide_damping)
     return YAMInterface()

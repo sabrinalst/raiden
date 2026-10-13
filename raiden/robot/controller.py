@@ -32,6 +32,7 @@ from i2rt.robots.robot import Robot  # noqa: E402
 from i2rt.robots.utils import ARM_YAM_XML_PATH as _ARM_YAM_XML_PATH  # noqa: E402
 from i2rt.robots.utils import GripperType  # noqa: E402
 
+from raiden._config import load_can_interfaces  # noqa: E402
 from raiden.robot._jparse import jparse_step  # noqa: E402
 from raiden.robot.footpedal import try_open_footpedal  # noqa: E402
 
@@ -366,6 +367,7 @@ class RobotController:
         use_left_leader: bool = True,
         use_right_follower: bool = True,
         use_left_follower: bool = True,
+        can_interfaces: Optional[Dict[str, str]] = None,
     ):
         """Initialize robot controller
 
@@ -374,11 +376,15 @@ class RobotController:
             use_left_leader: Initialize left leader arm
             use_right_follower: Initialize right follower arm
             use_left_follower: Initialize left follower arm
+            can_interfaces: Arm → SocketCAN interface name mapping.  Defaults to
+                the names in ~/.config/raiden/can.json, falling back to the
+                standard can_follower_r / can_leader_l / … names.
         """
         self.use_right_leader = use_right_leader
         self.use_left_leader = use_left_leader
         self.use_right_follower = use_right_follower
         self.use_left_follower = use_left_follower
+        self.can_interfaces = can_interfaces or load_can_interfaces()
 
         # Robot references
         self.leader_r: Optional[YAMLeaderRobot] = None
@@ -424,13 +430,13 @@ class RobotController:
         required_interfaces = []
 
         if self.use_right_follower:
-            required_interfaces.append("can_follower_r")
+            required_interfaces.append(self.can_interfaces["follower_r"])
         if self.use_left_follower:
-            required_interfaces.append("can_follower_l")
+            required_interfaces.append(self.can_interfaces["follower_l"])
         if self.use_right_leader:
-            required_interfaces.append("can_leader_r")
+            required_interfaces.append(self.can_interfaces["leader_r"])
         if self.use_left_leader:
-            required_interfaces.append("can_leader_l")
+            required_interfaces.append(self.can_interfaces["leader_l"])
 
         missing_interfaces = []
         for interface in required_interfaces:
@@ -474,7 +480,11 @@ class RobotController:
             threads.append(
                 threading.Thread(
                     target=_init,
-                    args=("right follower", "can_follower_r", GripperType.LINEAR_4310),
+                    args=(
+                        "right follower",
+                        self.can_interfaces["follower_r"],
+                        GripperType.LINEAR_4310,
+                    ),
                     daemon=True,
                 )
             )
@@ -482,7 +492,11 @@ class RobotController:
             threads.append(
                 threading.Thread(
                     target=_init,
-                    args=("left follower", "can_follower_l", GripperType.LINEAR_4310),
+                    args=(
+                        "left follower",
+                        self.can_interfaces["follower_l"],
+                        GripperType.LINEAR_4310,
+                    ),
                     daemon=True,
                 )
             )
@@ -492,7 +506,7 @@ class RobotController:
                     target=_init,
                     args=(
                         "right leader",
-                        "can_leader_r",
+                        self.can_interfaces["leader_r"],
                         GripperType.YAM_TEACHING_HANDLE,
                     ),
                     daemon=True,
@@ -504,7 +518,7 @@ class RobotController:
                     target=_init,
                     args=(
                         "left leader",
-                        "can_leader_l",
+                        self.can_interfaces["leader_l"],
                         GripperType.YAM_TEACHING_HANDLE,
                     ),
                     daemon=True,
@@ -562,20 +576,83 @@ class RobotController:
         if gravity_comp_mode:
             self.enable_gravity_compensation()
 
-    def enable_gravity_compensation(self) -> None:
-        """Enable gravity compensation mode (free movement with zero stiffness)"""
+    @staticmethod
+    def _release_to_gravity_comp(
+        robot, n_joints: int, damping: Optional[np.ndarray] = None
+    ) -> None:
+        """Make one arm free to move by hand, apart from gravity compensation.
+
+        update_kp_kd() only updates the gains used by the *next* position
+        command — the running control loop keeps sending the gains latched into
+        _commands by the last command_joint_pos().  Zeroing the gains alone
+        therefore leaves the arm holding its last target at full stiffness.
+
+        With no damping the active command is cleared outright via
+        zero_torque_mode().  With damping, a position command is issued at the
+        *current* pose carrying kp=0 and the requested kd: the position target
+        is inert because kp is zero, leaving pure velocity damping that resists
+        drift (a cable tugging on the arm) without resisting deliberate motion.
+
+        Gravity compensation is unaffected either way: the motor torque is
+        ``commanded torque + g * gravity_comp_factor``.
+        """
+        # YAMLeaderRobot wraps the MotorChainRobot rather than subclassing it.
+        base = getattr(robot, "_robot", robot)
+
+        if damping is None or not np.any(damping):
+            robot.update_kp_kd(kp=np.zeros(n_joints), kd=np.zeros(n_joints))
+            base.zero_torque_mode()
+            return
+
+        # Clear the stiff command first so the arm cannot lurch toward its old
+        # target while the damped command is being issued.
+        base.zero_torque_mode()
+        robot.update_kp_kd(kp=np.zeros(n_joints), kd=damping)
+        robot.command_joint_pos(base.get_joint_pos())
+
+    def enable_gravity_compensation(self, damping_scale: float = 0.0) -> None:
+        """Enable gravity compensation mode (free movement by hand)
+
+        Args:
+            damping_scale: Fraction of each arm's nominal kd to retain as
+                velocity damping.  0.0 releases the arms completely; a small
+                value (~0.2) makes them resist being dragged by cable tension
+                while still moving freely under hand pressure.
+        """
         print("  - Enabling gravity compensation mode...")
 
-        if self.leader_r:
-            self.leader_r.update_kp_kd(kp=np.zeros(6), kd=np.zeros(6))
-        if self.leader_l:
-            self.leader_l.update_kp_kd(kp=np.zeros(6), kd=np.zeros(6))
-        if self.follower_r:
-            self.follower_r.update_kp_kd(kp=np.zeros(7), kd=np.zeros(7))
-        if self.follower_l:
-            self.follower_l.update_kp_kd(kp=np.zeros(7), kd=np.zeros(7))
+        def _damping(key: str, n_joints: int) -> Optional[np.ndarray]:
+            if damping_scale <= 0.0:
+                return None
+            nominal = self.kd_gains.get(key)
+            if nominal is None:
+                return None
+            return np.asarray(nominal[:n_joints], dtype=float) * damping_scale
 
-        print("✓ Gravity compensation mode enabled (robots free to move by hand)")
+        if self.leader_r:
+            self._release_to_gravity_comp(
+                self.leader_r, 6, _damping("leader_r", 6)
+            )
+        if self.leader_l:
+            self._release_to_gravity_comp(
+                self.leader_l, 6, _damping("leader_l", 6)
+            )
+        if self.follower_r:
+            self._release_to_gravity_comp(
+                self.follower_r, 7, _damping("follower_r", 7)
+            )
+        if self.follower_l:
+            self._release_to_gravity_comp(
+                self.follower_l, 7, _damping("follower_l", 7)
+            )
+
+        if damping_scale > 0.0:
+            print(
+                f"✓ Gravity compensation mode enabled "
+                f"(free to move by hand, {damping_scale:.0%} damping)"
+            )
+        else:
+            print("✓ Gravity compensation mode enabled (robots free to move by hand)")
 
     def disable_gravity_compensation(self) -> None:
         """Restore position control (disable gravity compensation mode)"""
@@ -1343,14 +1420,15 @@ class RobotController:
         self.move_to_home_positions(simultaneous=True)
 
         # Enable gravity compensation mode for leaders only
-        print(
-            "  - Disabling position control on leaders for gravity compensation mode..."
-        )
-        if self.leader_r:
-            self.leader_r.update_kp_kd(kp=np.zeros(6), kd=np.zeros(6))
-        if self.leader_l:
-            self.leader_l.update_kp_kd(kp=np.zeros(6), kd=np.zeros(6))
-        print("✓ Leaders in gravity compensation mode")
+        if self.leader_r or self.leader_l:
+            print(
+                "  - Disabling position control on leaders for gravity compensation mode..."
+            )
+            if self.leader_r:
+                self.leader_r.update_kp_kd(kp=np.zeros(6), kd=np.zeros(6))
+            if self.leader_l:
+                self.leader_l.update_kp_kd(kp=np.zeros(6), kd=np.zeros(6))
+            print("✓ Leaders in gravity compensation mode")
 
         # Gripper ready signal
         self.signal_ready_with_grippers()

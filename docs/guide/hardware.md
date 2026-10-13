@@ -126,6 +126,22 @@ the single arm is always treated as the left arm. Follow the
 i2rt guide to assign them:
 [Setting a persistent ID for a socket CAN interface](https://github.com/i2rt-robotics/i2rt/blob/7b6d5016f05ca63f9ef0185b7143e63f2c7a5708/docs/getting-started/hardware-setup.md#persistent-can-ids).
 
+### Mapping existing interface names
+
+If your adapters already have different persistent names, map them instead of
+renaming by creating `~/.config/raiden/can.json`:
+
+```json
+{
+  "follower_r": "can_right",
+  "follower_l": "can_left"
+}
+```
+
+Any arm not listed keeps its default name from the table above. Arms you do not
+have connected simply need a control mode that does not use them — for example
+`rd record_calibration_poses --control handguide` needs no leader arms.
+
 ### Identifying each arm
 
 Because all arms look identical on the bus, **connect and name them one at a

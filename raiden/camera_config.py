@@ -208,7 +208,19 @@ class CameraConfig:
         if cam_type == "realsense":
             from raiden.cameras.realsense import RealSenseCamera
 
-            return RealSenseCamera(name, str(serial), fps=fps)
+            # Optional "color_size": [width, height] override, e.g. [1280, 720]
+            # so that small ChArUco markers stay decodable during calibration.
+            def _size(key: str):
+                v = entry.get(key) if isinstance(entry, dict) else None
+                return (int(v[0]), int(v[1])) if v is not None else None
+
+            return RealSenseCamera(
+                name,
+                str(serial),
+                fps=fps,
+                color_size=_size("color_size"),
+                depth_size=_size("depth_size"),
+            )
 
         raise ValueError(
             f"Unknown camera type '{cam_type}' for camera '{name}'. "

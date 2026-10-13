@@ -70,10 +70,34 @@ class RealSenseCamera(Camera):
     _COLOR_W, _COLOR_H = 640, 480
     _DEPTH_W, _DEPTH_H = 640, 480
 
-    def __init__(self, camera_name: str, serial_number: str, fps: int = 30):
+    def __init__(
+        self,
+        camera_name: str,
+        serial_number: str,
+        fps: int = 30,
+        color_size: Optional[Tuple[int, int]] = None,
+        depth_size: Optional[Tuple[int, int]] = None,
+    ):
+        """
+        Args:
+            color_size: (width, height) for the colour stream, overriding the
+                640x480 default.  Higher resolutions make small ChArUco markers
+                decodable during calibration — marker size in pixels scales
+                linearly with width — at the cost of USB bandwidth.
+            depth_size: (width, height) for the depth stream.  Defaults to
+                color_size when that is given: on the D405 colour and depth are
+                derived from the same stereo pair and the pipeline refuses to
+                resolve a request that asks for mismatched resolutions.
+        """
         self._name = camera_name
         self._serial = serial_number
         self._fps = fps
+        if color_size is not None:
+            self._COLOR_W, self._COLOR_H = int(color_size[0]), int(color_size[1])
+        if depth_size is None:
+            depth_size = color_size
+        if depth_size is not None:
+            self._DEPTH_W, self._DEPTH_H = int(depth_size[0]), int(depth_size[1])
         self._pipeline: Optional[rs.pipeline] = None
         self._config: Optional[rs.config] = None
         self._profile: Optional[rs.pipeline_profile] = None

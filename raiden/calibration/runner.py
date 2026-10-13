@@ -26,6 +26,16 @@ from raiden.robot.controller import RobotController, smooth_move_joints
 # Global kinematics instance (cached for efficiency)
 _kinematics_cache: Optional[Kinematics] = None
 
+# A freshly started RealSense sometimes delivers no frames at all; waiting
+# longer doesn't help but restarting the pipeline does.  Wait this long for
+# the first frame before restarting, up to CAMERA_START_ATTEMPTS times.
+CAMERA_FIRST_FRAME_TIMEOUT_S = 3.0
+CAMERA_START_ATTEMPTS = 6
+
+# Frames to discard after starting a camera so auto-exposure can settle
+# (one-camera-at-a-time capture only)
+CAPTURE_WARMUP_FRAMES = 15
+
 
 def compute_bimanual_base_transform_from_calibration(
     left_arm_poses: List[np.ndarray],
@@ -217,8 +227,12 @@ class CalibrationRunner:
         poses_file: str = CALIBRATION_POSES_FILE,
         output_file: str = CALIBRATION_FILE,
         charuco_config: Optional[ChArUcoBoardConfig] = None,
+        one_camera_at_a_time: bool = True,
     ):
         self.camera_config_file = camera_config_file
+        # Stream only one camera at a time (started per capture, then stopped)
+        # so cameras sharing a USB hub don't compete for bandwidth.
+        self.one_camera_at_a_time = one_camera_at_a_time
         self.poses_file = poses_file
         self.output_file = output_file
         self._charuco_config_override = charuco_config
@@ -230,6 +244,8 @@ class CalibrationRunner:
 
         self.robot_controller: Optional[RobotController] = None
         self.cameras: Dict[str, Camera] = {}
+        # Intrinsics read at startup, so they stay available while cameras are stopped
+        self._intrinsics: Dict[str, Tuple[np.ndarray, np.ndarray, Tuple[int, int]]] = {}
         self._move_stop_event = threading.Event()
 
     def load_configuration(self):
@@ -291,17 +307,81 @@ class CalibrationRunner:
 
             print(f"  - Initializing {name} ({cam_type}, serial: {serial})...")
             camera = self.camera_config.create_camera(name)
-            camera.open()
+            self._start_streaming(name, camera)
             self.cameras[name] = camera
+            self._intrinsics[name] = camera.get_intrinsics()
+            if self.one_camera_at_a_time:
+                # Stop it until its first capture
+                self._close_camera(camera)
 
-        # Warm up all cameras together after all are open, so each one has had
-        # time to stabilize regardless of how many cameras are connected.
-        print(f"  Warming up cameras ({warmup_frames} frames)...")
-        for _ in range(warmup_frames):
-            for camera in self.cameras.values():
-                camera.grab()
+        if not self.one_camera_at_a_time:
+            # Warm up all cameras together after all are open, so each one has had
+            # time to stabilize regardless of how many cameras are connected.
+            print(f"  Warming up cameras ({warmup_frames} frames)...")
+            for _ in range(warmup_frames):
+                for camera in self.cameras.values():
+                    camera.grab()
+        else:
+            print("  One camera at a time: each camera streams only while capturing")
 
         print("✓ Cameras initialized")
+
+    def _get_intrinsics(
+        self, camera_name: str
+    ) -> Tuple[np.ndarray, np.ndarray, Tuple[int, int]]:
+        if camera_name not in self._intrinsics:
+            self._intrinsics[camera_name] = self.cameras[camera_name].get_intrinsics()
+        return self._intrinsics[camera_name]
+
+    @staticmethod
+    def _close_camera(camera: Camera) -> None:
+        try:
+            camera.close()
+        except RuntimeError:
+            # Pipeline never started (failed open); nothing to release
+            pass
+
+    @classmethod
+    def _start_streaming(cls, camera_name: str, camera: Camera) -> None:
+        """Open a camera and wait for its first frame, restarting it if it stalls."""
+        for attempt in range(1, CAMERA_START_ATTEMPTS + 1):
+            camera.open()
+            deadline = time.monotonic() + CAMERA_FIRST_FRAME_TIMEOUT_S
+            while time.monotonic() < deadline:
+                if camera.grab():
+                    return
+            cls._close_camera(camera)
+            print(
+                f"    {camera_name}: no frames after "
+                f"{CAMERA_FIRST_FRAME_TIMEOUT_S:.0f}s, restarting "
+                f"({attempt}/{CAMERA_START_ATTEMPTS})"
+            )
+        raise RuntimeError(
+            f"grab() failed for {camera_name}: no frames after "
+            f"{CAMERA_START_ATTEMPTS} restarts"
+        )
+
+    def _capture_image(self, camera_name: str, camera: Camera) -> np.ndarray:
+        """Grab one colour image from a camera.
+
+        In one-camera-at-a-time mode the camera is started just for this
+        capture and stopped again afterwards.
+        """
+        if not self.one_camera_at_a_time:
+            if not camera.grab():
+                raise RuntimeError(f"grab() failed for {camera_name}")
+            return camera.get_frame().color
+
+        self._start_streaming(camera_name, camera)
+        try:
+            for _ in range(CAPTURE_WARMUP_FRAMES):
+                camera.grab()
+            if not camera.grab():
+                raise RuntimeError(f"grab() failed for {camera_name}")
+            # Copy: the frame buffer is released when the pipeline stops
+            return camera.get_frame().color.copy()
+        finally:
+            self._close_camera(camera)
 
     def _compute_and_apply_bimanual_transform(
         self, camera_data: Dict, left_camera_id: str, right_camera_id: str
@@ -347,9 +427,11 @@ class CalibrationRunner:
             print("  ✗ Camera objects not found")
             return False
 
-        left_cam_matrix, left_dist_coeffs, left_img_size = left_camera.get_intrinsics()
+        left_cam_matrix, left_dist_coeffs, left_img_size = self._get_intrinsics(
+            left_camera_id
+        )
         right_cam_matrix, right_dist_coeffs, right_img_size = (
-            right_camera.get_intrinsics()
+            self._get_intrinsics(right_camera_id)
         )
 
         print(
@@ -522,6 +604,7 @@ class CalibrationRunner:
                 "images": [],
                 "corners": [],
                 "ids": [],
+                "pose_indices": [],  # Which recorded poses the board was detected in
                 "robot_poses": [],
                 "joint_positions": [],  # Store joint positions for bimanual transform computation
                 "arm_type": "left"
@@ -579,12 +662,26 @@ class CalibrationRunner:
             # Capture images and detect board
             print("  Capturing images...")
             for camera_name, camera in self.cameras.items():
-                try:
-                    # Capture frame
-                    if not camera.grab():
-                        raise RuntimeError(f"grab() failed for {camera_name}")
-                    image = camera.get_frame().color
+                # A camera that delivers no frame is a hardware problem, not a
+                # missed board: retry at this pose (arms hold still) rather
+                # than skip it. Ctrl-C aborts.
+                attempt = 1
+                while True:
+                    try:
+                        image = self._capture_image(camera_name, camera)
+                        break
+                    except RuntimeError as e:
+                        print(
+                            f"    ✗ {camera_name}: capture failed at pose {i + 1}/{len(poses)} "
+                            f"(attempt {attempt}): {e}"
+                        )
+                        print(
+                            "      Retrying... (check/replug the camera; Ctrl-C to abort)"
+                        )
+                        attempt += 1
+                        time.sleep(1.0)
 
+                try:
                     # Ensure image is contiguous and has correct dtype
                     image = np.ascontiguousarray(image, dtype=np.uint8)
 
@@ -596,6 +693,7 @@ class CalibrationRunner:
                     if corners is not None and len(corners) > 0:
                         camera_data[camera_name]["corners"].append(corners)
                         camera_data[camera_name]["ids"].append(ids)
+                        camera_data[camera_name]["pose_indices"].append(i)
                         print(
                             f"    ✓ {camera_name}: ChArUco board detected ({len(corners)} corners)"
                         )
@@ -786,7 +884,9 @@ class CalibrationRunner:
                     print("  ✗ Camera object not found")
                     continue
 
-                cam_matrix, dist_coeffs, image_size = camera.get_intrinsics()
+                cam_matrix, dist_coeffs, image_size = self._get_intrinsics(
+                    camera_name
+                )
                 print(
                     f"    ✓ fx={cam_matrix[0, 0]:.1f}, fy={cam_matrix[1, 1]:.1f}, cx={cam_matrix[0, 2]:.1f}, cy={cam_matrix[1, 2]:.1f}"
                 )
@@ -894,9 +994,8 @@ class CalibrationRunner:
                                 )
 
                                 # Get left intrinsics
-                                left_camera = self.cameras.get(left_wrist_camera_id)
                                 left_cam_matrix, left_dist_coeffs, _ = (
-                                    left_camera.get_intrinsics()
+                                    self._get_intrinsics(left_wrist_camera_id)
                                 )
 
                                 # Estimate board poses from left camera
@@ -1034,14 +1133,21 @@ class CalibrationRunner:
 
             # Compute quality metrics
             total_poses = len(self.poses_data["poses"])
-            poses_with_detections = max(
-                len(data["corners"]) for data in camera_data.values()
-            )
+            detections_per_camera = {
+                name: len(data["pose_indices"]) for name, data in camera_data.items()
+            }
+            # Poses where every camera saw the board
+            poses_with_detections = len(
+                set.intersection(
+                    *(set(data["pose_indices"]) for data in camera_data.values())
+                )
+            ) if camera_data else 0
 
             results["quality_metrics"] = {
                 "overall_success": len(results["cameras"]) > 0,
                 "poses_collected": total_poses,
                 "poses_with_detections": poses_with_detections,
+                "detections_per_camera": detections_per_camera,
                 "detection_rate": poses_with_detections / total_poses
                 if total_poses > 0
                 else 0,
@@ -1051,10 +1157,19 @@ class CalibrationRunner:
             print("Calibration complete!")
             print("\nSummary:")
             print(f"  - Cameras calibrated: {len(results['cameras'])}")
-            print(f"  - Poses used: {poses_with_detections}/{total_poses}")
             print(
-                f"  - Detection rate: {results['quality_metrics']['detection_rate'] * 100:.1f}%"
+                f"  - Poses with board seen by every camera: "
+                f"{poses_with_detections}/{total_poses}"
             )
+            for name, data in camera_data.items():
+                n = detections_per_camera[name]
+                missed = [
+                    self.poses_data["poses"][j]["name"]
+                    for j in range(total_poses)
+                    if j not in data["pose_indices"]
+                ]
+                flag = f"  ⚠ board not detected in: {', '.join(missed)}" if missed else ""
+                print(f"  - {name}: board detected in {n}/{total_poses} poses{flag}")
             if bimanual_transform_computed:
                 print("  - Bimanual transform: Computed from calibration data ✓")
             elif T_RIGHT_BASE_TO_LEFT_BASE is not None:
@@ -1100,7 +1215,7 @@ class CalibrationRunner:
 
             # Close cameras first (quick and safe)
             for camera in self.cameras.values():
-                camera.close()
+                self._close_camera(camera)
             print("  ✓ Cameras closed")
 
             print("\n✓ Cleanup complete")

@@ -22,6 +22,7 @@ from raiden.converter import convert_task, select_tasks
 from raiden.recorder import run_recording
 from raiden.robot.replay import run_replay
 from raiden.robot.teleop import run_bimanual_teleop
+from raiden.robot.zero import run_zero_torque
 from raiden.shardify import ShardifyConfig, run_shardify, select_processed_task
 from raiden.utils import select_processed_recording, select_recording
 from raiden.visualizer import select_task_and_episode, visualize_recording
@@ -165,8 +166,9 @@ class RecordCalibrationPosesCommand:
     output_file: str = CALIBRATION_POSES_FILE
     """Path to save calibration poses"""
 
-    control: Literal["leader", "spacemouse"] = "leader"
-    """Control mode: leader-follower arms or SpaceMouse EE velocity control"""
+    control: Literal["leader", "spacemouse", "handguide"] = "leader"
+    """Control mode: leader-follower arms, SpaceMouse EE velocity control, or
+    'handguide' to pose the follower arms directly by hand (needs no leader arms)"""
 
     spacemouse_path_r: str = "/dev/hidraw7"
     """hidraw path for the right-arm SpaceMouse (spacemouse mode only)"""
@@ -183,6 +185,10 @@ class RecordCalibrationPosesCommand:
     invert_rotation: bool = False
     """Negate all SpaceMouse rotation axes (spacemouse mode only)"""
 
+    handguide_damping: float = 0.2
+    """Fraction of nominal kd kept as velocity damping while hand-guiding
+    (handguide mode only). Resists cable drag; 0 releases the arms completely"""
+
 
 @dataclass
 class CalibrateCommand:
@@ -197,20 +203,23 @@ class CalibrateCommand:
     camera_config_file: str = CAMERA_CONFIG
     """Path to camera.json"""
 
-    squares_x: int = 9
-    """Number of squares along the X axis of the ChArUco board (default: 9)"""
+    squares_x: int = 14
+    """Number of squares along the X axis of the ChArUco board (default: 14)"""
 
     squares_y: int = 9
     """Number of squares along the Y axis of the ChArUco board (default: 9)"""
 
-    square_length: float = 0.03
-    """Checker square side length in metres (default: 0.03 = 30 mm)"""
+    square_length: float = 0.02
+    """Checker square side length in metres (default: 0.02 = 20 mm)"""
 
-    marker_length: float = 0.023
-    """ArUco marker side length in metres (default: 0.023 = 23 mm)"""
+    marker_length: float = 0.015
+    """ArUco marker side length in metres (default: 0.015 = 15 mm)"""
 
-    dictionary: str = "DICT_6X6_250"
-    """ArUco dictionary (default: DICT_6X6_250)"""
+    dictionary: str = "DICT_5X5_250"
+    """ArUco dictionary (default: DICT_5X5_250)"""
+
+    one_camera_at_a_time: bool = True
+    """Stream one camera at a time during capture, so cameras sharing a USB hub don't drop frames (slower)"""
 
 
 @dataclass
@@ -257,6 +266,20 @@ class ReplayCommand:
 
     source: Literal["raw", "processed"] = "raw"
     """Data source: 'raw' loads joint commands directly from robot_data.npz (no IK); 'processed' loads EE poses from lowdim pkls and solves IK"""
+
+
+@dataclass
+class ZeroCommand:
+    """Release the follower arms so they can be moved freely by hand"""
+
+    arms: Literal["bimanual", "single"] = "bimanual"
+    """Which arms to release: both followers or left only"""
+
+    damping: float = 0.0
+    """Fraction of nominal kd kept as velocity damping (0.0 = fully limp; ~0.2 resists drift from cable tension)"""
+
+    home_on_exit: bool = True
+    """Return the arms to their home poses on exit instead of stiffening where they were left"""
 
 
 @dataclass
@@ -405,6 +428,9 @@ def _print_help() -> None:
         "  convert                     Convert SVO2/bag recordings to UnifiedDataset format"
     )
     print("  replay                      Replay recorded follower arm motion")
+    print(
+        "  zero                        Release the arms (gravity compensation only) to move by hand"
+    )
     print("  visualize                   Visualize a converted recording with Rerun")
     print("  record_calibration_poses    Record robot poses for camera calibration")
     print("  calibrate                   Run camera calibration using recorded poses")
@@ -504,6 +530,21 @@ def main():
                 visualize=command.visualize,
             )
 
+        elif subcommand == "zero":
+            sys.argv.pop(1)
+            command = tyro.cli(
+                ZeroCommand,
+                description=(
+                    "Release the follower arms into gravity-compensation-only mode "
+                    "so they can be moved freely by hand"
+                ),
+            )
+            run_zero_torque(
+                arms=command.arms,
+                damping=command.damping,
+                home_on_exit=command.home_on_exit,
+            )
+
         elif subcommand == "list_devices":
             sys.argv.pop(1)
             tyro.cli(
@@ -529,6 +570,7 @@ def main():
                     vel_scale=command.vel_scale,
                     rot_scale=command.rot_scale,
                     invert_rotation=command.invert_rotation,
+                    handguide_damping=command.handguide_damping,
                 ),
                 min_poses=command.min_poses,
                 output_file=command.output_file,
@@ -557,6 +599,7 @@ def main():
                 poses_file=command.poses_file,
                 output_file=command.output_file,
                 charuco_config=charuco_config,
+                one_camera_at_a_time=command.one_camera_at_a_time,
             )
             runner.run_calibration(
                 left_wrist_camera_id=_cfg.get_camera_by_role("left_wrist"),

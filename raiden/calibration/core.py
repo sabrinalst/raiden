@@ -14,11 +14,11 @@ from scipy.spatial.transform import Rotation
 class ChArUcoBoardConfig:
     """Configuration for ChArUco calibration board"""
 
-    squares_x: int = 9
+    squares_x: int = 14
     squares_y: int = 9
-    square_length: float = 0.03  # meters (checker size: 30mm)
-    marker_length: float = 0.023  # meters (marker size: 23mm)
-    dictionary: str = "DICT_6X6_250"  # ArUco dictionary
+    square_length: float = 0.02  # meters (checker size: 20mm)
+    marker_length: float = 0.015  # meters (marker size: 15mm)
+    dictionary: str = "DICT_5X5_250"  # ArUco dictionary
 
     @staticmethod
     def from_dict(data: dict) -> "ChArUcoBoardConfig":
@@ -58,6 +58,20 @@ class ChArUcoDetector:
         self.detector_params = cv2.aruco.DetectorParameters()
         self.detector = cv2.aruco.ArucoDetector(self.dictionary, self.detector_params)
 
+        # OpenCV >= 4.7 replaced interpolateCornersCharuco() with CharucoDetector;
+        # OpenCV 5.0 removed the old function outright.
+        self.charuco_detector = cv2.aruco.CharucoDetector(self.board)
+
+    def _detect_board(self, gray: np.ndarray):
+        """Run ChArUco detection, returning (charuco_corners, charuco_ids,
+        marker_corners, marker_ids) with None for anything not detected."""
+        charuco_corners, charuco_ids, marker_corners, marker_ids = (
+            self.charuco_detector.detectBoard(gray)
+        )
+        if charuco_ids is None or len(charuco_ids) == 0:
+            return None, None, marker_corners, marker_ids
+        return charuco_corners, charuco_ids, marker_corners, marker_ids
+
     def detect(
         self, image: np.ndarray
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
@@ -77,21 +91,8 @@ class ChArUcoDetector:
         else:
             gray = image
 
-        # Detect ArUco markers
-        marker_corners, marker_ids, _ = self.detector.detectMarkers(gray)
-
-        if marker_ids is None or len(marker_ids) == 0:
-            return None, None
-
-        # Interpolate ChArUco corners
-        num_corners, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
-            markerCorners=marker_corners,
-            markerIds=marker_ids,
-            image=gray,
-            board=self.board,
-        )
-
-        if num_corners == 0:
+        charuco_corners, charuco_ids, _, _ = self._detect_board(gray)
+        if charuco_ids is None:
             return None, None
 
         return charuco_corners, charuco_ids
@@ -119,24 +120,14 @@ class ChArUcoDetector:
         else:
             gray = image
 
-        # Detect ArUco markers
-        marker_corners, marker_ids, _ = self.detector.detectMarkers(gray)
+        charuco_corners, charuco_ids, marker_corners, marker_ids = self._detect_board(
+            gray
+        )
 
         if marker_ids is None or len(marker_ids) == 0:
             return None, None, None, None
 
-        # Interpolate ChArUco corners
-        num_corners, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
-            markerCorners=marker_corners,
-            markerIds=marker_ids,
-            image=gray,
-            board=self.board,
-        )
-
-        if num_corners == 0:
-            # Return marker info even if ChArUco detection failed
-            return None, None, marker_corners, marker_ids
-
+        # Return marker info even if ChArUco corner detection failed
         return charuco_corners, charuco_ids, marker_corners, marker_ids
 
     def estimate_pose(
@@ -159,14 +150,20 @@ class ChArUcoDetector:
             - rvec: Rotation vector (3x1)
             - tvec: Translation vector (3x1)
         """
-        success, rvec, tvec = cv2.aruco.estimatePoseCharucoBoard(
-            charucoCorners=corners,
-            charucoIds=ids,
-            board=self.board,
-            cameraMatrix=camera_matrix,
-            distCoeffs=dist_coeffs,
-            rvec=None,
-            tvec=None,
+        # estimatePoseCharucoBoard() was removed in OpenCV 5.0; the supported
+        # path is matchImagePoints() to lift the corners into board coordinates,
+        # then a generic solvePnP.
+        obj_points, img_points = self.board.matchImagePoints(corners, ids)
+
+        # solvePnP needs at least 4 correspondences to be well posed.
+        if obj_points is None or img_points is None or len(obj_points) < 4:
+            return None, None
+
+        success, rvec, tvec = cv2.solvePnP(
+            obj_points,
+            img_points,
+            np.asarray(camera_matrix, dtype=np.float64),
+            np.asarray(dist_coeffs, dtype=np.float64),
         )
 
         if not success:
@@ -205,16 +202,35 @@ class CameraCalibrator:
         if len(all_corners) < 3:
             return {"success": False, "error": "Need at least 3 views for calibration"}
 
-        # Calibrate camera
-        ret, camera_matrix, dist_coeffs, rvecs, tvecs = (
-            cv2.aruco.calibrateCameraCharuco(
-                charucoCorners=all_corners,
-                charucoIds=all_ids,
-                board=self.detector.board,
-                imageSize=image_size,
-                cameraMatrix=None,
-                distCoeffs=None,
-            )
+        # calibrateCameraCharuco() was removed in OpenCV 5.0.  Lift each view's
+        # corners into board coordinates with matchImagePoints() and hand the
+        # correspondences to the generic calibrateCamera().
+        object_points = []
+        image_points = []
+        for corners, ids in zip(all_corners, all_ids):
+            obj_pts, img_pts = self.detector.board.matchImagePoints(corners, ids)
+            # calibrateCamera needs >= 4 correspondences per view; views with
+            # fewer are dropped rather than failing the whole calibration.
+            if obj_pts is None or img_pts is None or len(obj_pts) < 4:
+                continue
+            object_points.append(np.asarray(obj_pts, dtype=np.float32))
+            image_points.append(np.asarray(img_pts, dtype=np.float32))
+
+        if len(object_points) < 3:
+            return {
+                "success": False,
+                "error": (
+                    f"Need at least 3 usable views for calibration "
+                    f"(got {len(object_points)} with >= 4 matched corners)"
+                ),
+            }
+
+        ret, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
+            object_points,
+            image_points,
+            image_size,
+            None,
+            None,
         )
 
         return {

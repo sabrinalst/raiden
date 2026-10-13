@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from raiden._config import CAMERA_CONFIG, SPACEMOUSE_CONFIG
+from raiden._config import CAMERA_CONFIG, SPACEMOUSE_CONFIG, load_can_interfaces
 
 # ---------------------------------------------------------------------------
 # Cameras
@@ -51,17 +51,21 @@ def list_zed_cameras() -> list:
 # Robot arms (CAN interfaces)
 # ---------------------------------------------------------------------------
 
-_CAN_INTERFACES = {
-    "can_follower_r": "Right follower arm",
-    "can_follower_l": "Left follower arm",
-    "can_leader_r": "Right leader arm",
-    "can_leader_l": "Left leader arm",
+_ARM_LABELS = {
+    "follower_r": "Right follower arm",
+    "follower_l": "Left follower arm",
+    "leader_r": "Right leader arm",
+    "leader_l": "Left leader arm",
 }
 
 
 def list_arms() -> list:
+    # Resolve through can.json so the listing matches the names Raiden will
+    # actually open.
+    interfaces = load_can_interfaces()
     results = []
-    for iface, label in _CAN_INTERFACES.items():
+    for arm, label in _ARM_LABELS.items():
+        iface = interfaces[arm]
         result = subprocess.run(
             ["ip", "link", "show", iface],
             capture_output=True,
@@ -85,7 +89,15 @@ def list_spacemice() -> list:
         import easyhid
     except ImportError:
         return []
-    h = easyhid.Enumeration()
+    try:
+        h = easyhid.Enumeration()
+    except AttributeError:
+        # easyhid falls back to dlopen(None) when libhidapi-hidraw is missing
+        print(
+            "Warning: libhidapi-hidraw not found; cannot list SpaceMouse devices "
+            "(install with: sudo apt install libhidapi-hidraw0)"
+        )
+        return []
     seen: set = set()
     results = []
     for d in h.find():

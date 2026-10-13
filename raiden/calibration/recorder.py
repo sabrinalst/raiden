@@ -24,11 +24,11 @@ from raiden.robot.controller import RobotController
 class ChArUcoBoardConfig:
     """Configuration for ChArUco calibration board"""
 
-    squares_x: int = 9
+    squares_x: int = 14
     squares_y: int = 9
-    square_length: float = 0.03  # meters (checker size: 30mm)
-    marker_length: float = 0.023  # meters (marker size: 23mm)
-    dictionary: str = "DICT_6X6_250"  # ArUco dictionary
+    square_length: float = 0.02  # meters (checker size: 20mm)
+    marker_length: float = 0.015  # meters (marker size: 15mm)
+    dictionary: str = "DICT_5X5_250"  # ArUco dictionary
 
     def to_dict(self):
         return asdict(self)
@@ -294,6 +294,8 @@ class CalibrationPoseRecorder:
         print("  1. Position the ChArUco board in a fixed location")
         if self.interface.uses_leaders:
             print("  2. Move the LEADER arms - followers will automatically follow")
+        elif self.interface.name == "handguide":
+            print("  2. Move the follower arms directly by hand")
         else:
             print("  2. Move the robot arms using the input device")
         print("  3. Position so the board is clearly visible from the camera(s)")

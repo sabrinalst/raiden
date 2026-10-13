@@ -50,6 +50,38 @@ Keyboard controls:
 
 Poses are saved to `~/.config/raiden/calibration_poses.json`.
 
+### Recording without leader arms
+
+By default the followers are posed by moving the leader arms. If you have no
+leader arms connected, use hand-guide mode:
+
+```bash
+rd record_calibration_poses --control handguide
+```
+
+The follower arms are put into zero-stiffness gravity-compensation mode so you
+can position them directly by hand, and poses are recorded with the **R** key.
+
+A small amount of velocity damping is retained so that cable tension does not
+slowly drag the arms out of position. Tune it with `--handguide-damping`, given
+as a fraction of the arm's nominal `kd`:
+
+| Value | Effect |
+|---|---|
+| `0.0` | Fully released — moves with the least effort, but drifts under cable pull |
+| `0.2` | Default — resists drift, still easy to reposition |
+| `0.4`+ | Noticeably stiff to move; use only if the arms still creep |
+
+Damping resists *speed*, not position, so it holds the arm against a steady
+tug without fighting you when you move it deliberately.
+
+!!! warning
+
+    In hand-guide mode the arms hold no position of their own — only gravity
+    compensation resists the load. Support both arms by hand before the
+    "HAND-GUIDE MODE ACTIVE" banner appears, and keep clear of anything the
+    arms could fall onto.
+
 ## Step 3 - Run calibration
 
 ```bash
@@ -60,24 +92,52 @@ If your board has different dimensions or a different dictionary, pass them here
 
 ```bash
 rd calibrate \
-    --squares-x 9 \
+    --squares-x 14 \
     --squares-y 9 \
-    --square-length 0.03 \
-    --marker-length 0.023 \
-    --dictionary DICT_6X6_250
+    --square-length 0.02 \
+    --marker-length 0.015 \
+    --dictionary DICT_5X5_250
 ```
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--squares-x` | `9` | Number of squares along X |
+| `--squares-x` | `14` | Number of squares along X |
 | `--squares-y` | `9` | Number of squares along Y |
-| `--square-length` | `0.03` | Checker square side length in metres |
-| `--marker-length` | `0.023` | ArUco marker side length in metres |
-| `--dictionary` | `DICT_6X6_250` | ArUco dictionary |
+| `--square-length` | `0.02` | Checker square side length in metres |
+| `--marker-length` | `0.015` | ArUco marker side length in metres |
+| `--dictionary` | `DICT_5X5_250` | ArUco dictionary |
 
 Raiden reads `~/.config/raiden/camera.json` and calibrates every camera whose
 `role` is `"left_wrist"`, `"right_wrist"`, or `"scene"` automatically - no
 explicit camera IDs are required.
+
+### If the board is not detected
+
+ChArUco detection needs roughly **3-4 pixels per marker bit cell**, i.e. a
+marker at least ~28 px across in the image. A 15 mm marker at 640x480 is only
+decodable within ~20 cm of a wrist camera, which is usually too close to be
+practical. Raise the colour resolution per camera in `camera.json`:
+
+```json
+"scene_camera": {
+  "serial": "254622075770", "type": "realsense", "role": "scene",
+  "color_size": [1280, 720],
+  "depth_size": [640, 480]
+}
+```
+
+`color_size` doubles the usable working distance at 1280x720. `depth_size`
+defaults to `color_size`; set it explicitly when the two must differ:
+
+- **D405** derives colour and depth from the same stereo pair and *rejects*
+  mismatched resolutions - leave `depth_size` unset so it follows `color_size`.
+- **D435** accepts a mismatch, and cannot sustain 1280x720 on both streams at
+  30 fps - pin `depth_size` to `[640, 480]` as above.
+
+Check the board dimensions too: `--squares-x` is the number of squares along
+the board's **long** edge if the board is wider than it is tall. A transposed
+board (9x14 vs 14x9) detects individual ArUco markers fine but yields **zero**
+ChArUco corners, since the marker IDs no longer land where the layout expects.
 
 The runner will:
 

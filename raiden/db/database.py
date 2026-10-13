@@ -45,17 +45,26 @@ def _repair_file(path: Path) -> bool:
         if not isinstance(data, dict) or "data" not in data:
             raise ValueError("missing 'data' key")
         return False  # file is fine
+    except FileNotFoundError:
+        # First run: nothing to preserve, so this is creation rather than repair.
+        with open(path, "w") as f:
+            json.dump(_EMPTY_DB, f, indent=3)
+        print(f"  [DB] Created {path.name}")
+        return True
     except (json.JSONDecodeError, ValueError, OSError):
         ts = int(time.time())
         backup = path.with_suffix(f".bak{ts}.json")
+        backed_up = False
         try:
             shutil.copy2(path, backup)
+            backed_up = True
             print(f"  [DB] Corrupt file backed up → {backup.name}")
-        except OSError:
-            pass
+        except OSError as e:
+            print(f"  [DB] WARNING: could not back up {path.name}: {e}")
         with open(path, "w") as f:
             json.dump(_EMPTY_DB, f, indent=3)
-        print(f"  [DB] Reinitialized {path.name} (data lost — see backup)")
+        detail = "see backup" if backed_up else "NO BACKUP WAS WRITTEN"
+        print(f"  [DB] Reinitialized {path.name} (data lost — {detail})")
         return True
 
 

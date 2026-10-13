@@ -13,7 +13,10 @@ dependencies = [
   "i2rt",
   "mink>=0.0.13",
   "numpy>=1.24",
-  "opencv-contrib-python>=4.8",
+  # <5: OpenCV 5.0 dropped the calibrateHandEye / calibrateRobotWorldHandEye
+  # Python bindings (the CALIB_HAND_EYE_* constants remain, the functions do
+  # not), which hand-eye calibration in raiden/calibration/ depends on.
+  "opencv-contrib-python>=4.8,<5",
   "scipy>=1.11",
   "questionary>=2.0",
   "pyrealsense2>=2.56.5.9235",

@@ -2011,7 +2011,7 @@ requires-dist = [
     { name = "onnxscript", marker = "extra == 'ffs'", specifier = ">=0.6.2" },
     { name = "onnxscript", marker = "extra == 'ffs-trt-cu12'", specifier = ">=0.6.2" },
     { name = "onnxscript", marker = "extra == 'ffs-trt-cu13'", specifier = ">=0.6.2" },
-    { name = "opencv-contrib-python", specifier = ">=4.8" },
+    { name = "opencv-contrib-python", specifier = ">=4.8,<5" },
     { name = "pyrealsense2", specifier = ">=2.56.5.9235" },
     { name = "pyrealsense2", marker = "extra == 'realsense'", specifier = ">=2.54" },
     { name = "pyroki", git = "https://github.com/chungmin99/pyroki.git" },
