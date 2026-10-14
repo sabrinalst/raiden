@@ -223,6 +223,47 @@ class CalibrateCommand:
 
 
 @dataclass
+class VizCalibrationCommand:
+    """Live 3D check of the camera calibration: every camera's point cloud plus both arms"""
+
+    calibration_file: str = CALIBRATION_FILE
+    """Path to calibration_results.json"""
+
+    camera_config_file: str = CAMERA_CONFIG
+    """Path to camera.json"""
+
+    arms: bool = True
+    """Connect to the follower arms to place the wrist cameras and draw the arms (--no-arms: scene camera only, arms untouched)"""
+
+    release: bool = True
+    """Release the arms (gravity compensation) so they can be moved by hand (--no-release: they hold their current pose)"""
+
+    damping: float = 0.2
+    """Fraction of nominal kd kept as velocity damping while released (resists drift from cable tension)"""
+
+    home_on_exit: bool = True
+    """Return the arms to their home poses on exit instead of stiffening where they were left"""
+
+    fps: int = 15
+    """Camera frame rate for this session only (camera.json is not changed)"""
+
+    rate: float = 5.0
+    """Viewer updates per second"""
+
+    stride: int = 4
+    """Use every N-th pixel for the point clouds"""
+
+    max_depth: float = 1.5
+    """Drop points further than this from the camera, in metres"""
+
+    web: bool = False
+    """Serve the viewer over HTTP instead of spawning the native app (useful over SSH tunnel)"""
+
+    web_port: int = 9090
+    """HTTP port for the web viewer"""
+
+
+@dataclass
 class ConvertCommand:
     """Convert raw camera recordings (SVO2/bag) to UnifiedDataset format"""
 
@@ -435,6 +476,9 @@ def _print_help() -> None:
     print("  record_calibration_poses    Record robot poses for camera calibration")
     print("  calibrate                   Run camera calibration using recorded poses")
     print(
+        "  viz_calibration             Live 3D check of the calibration (point clouds + arms)"
+    )
+    print(
         "  list_devices                List all connected cameras, arms, and SpaceMouse devices"
     )
     print(
@@ -605,6 +649,33 @@ def main():
                 left_wrist_camera_id=_cfg.get_camera_by_role("left_wrist"),
                 right_wrist_camera_id=_cfg.get_camera_by_role("right_wrist"),
                 scene_camera_ids=_cfg.get_cameras_by_role("scene") or None,
+            )
+
+        elif subcommand == "viz_calibration":
+            sys.argv.pop(1)
+            command = tyro.cli(
+                VizCalibrationCommand,
+                description=(
+                    "Live 3D check of the camera calibration. Streams every camera as a "
+                    "point cloud placed by calibration_results.json, with both arms' "
+                    "meshes posed from their measured joints, in the left-arm base frame."
+                ),
+            )
+            from raiden.calibration.viz import run_viz_calibration
+
+            run_viz_calibration(
+                calibration_file=command.calibration_file,
+                camera_config_file=command.camera_config_file,
+                arms=command.arms,
+                release=command.release,
+                damping=command.damping,
+                home_on_exit=command.home_on_exit,
+                fps=command.fps,
+                rate=command.rate,
+                stride=command.stride,
+                max_depth=command.max_depth,
+                web=command.web,
+                web_port=command.web_port,
             )
 
         elif subcommand == "convert":
